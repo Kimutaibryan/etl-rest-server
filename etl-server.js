@@ -75,7 +75,12 @@ const HapiSwaggerOptions = {
     info: {
         'title': 'REST API Documentation',
         'version': Pack.version,
-    }
+    },
+    tags: [
+    {'name': 'patient'},
+    {'name': 'location'}
+    ],
+    sortEndpoints: 'path'
 };
 
 
