@@ -1,5 +1,6 @@
 "use strict";
 var _ = require('underscore');
+var s = require("underscore.string");
 var walk = require('walk');
 var indicatorHandlersDefinition = require('./etl-processors.js');
 //Report Indicators Json Schema Path
@@ -7,17 +8,22 @@ var indicatorsSchemaDefinition = require('./reports/indicators.json');
 var reportList = [];
 //iterate the report folder picking  files satisfying  regex *report.json
 reportList.push.apply(reportList, require('./reports/hiv-summary-report.json'));
-reportList.push.apply(reportList, require('./reports/moh-731-report.json'));
+reportList.push.apply(reportList, require('./reports/moh-731-report-v2.json'));
 reportList.push.apply(reportList, require('./reports/patient-register-report.json'));
-reportList.push.apply(reportList, require('./reports/clinic-calander.report.json'));
+reportList.push.apply(reportList, require('./reports/clinic-calander-report-v2.json'));
 reportList.push.apply(reportList, require('./reports/daily-visits-appointment.report.json'));
-
+reportList.push.apply(reportList, require('./reports/clinical-reminder-report.json'));
+reportList.push.apply(reportList, require('./reports/moh-731-cohort-report.json'));
+reportList.push.apply(reportList, require('./reports/moh-731-indicator-report.json'));
+reportList.push.apply(reportList, require('./reports/moh-731-indicator-allsites-report.json'));
+reportList.push.apply(reportList, require('./reports/moh-731-cohort-allsites-report.json'));
 
 //etl-factory builds and generates queries dynamically in a generic way using indicator-schema and report-schema json files
 module.exports = function () {
     var reports;
     var indicatorsSchema;
     var indicatorHandlers;
+    var indicatorMap;
     initialize(reportList, indicatorsSchemaDefinition, indicatorHandlersDefinition);
     return {
         buildPatientListExpression: buildPatientListExpression,
@@ -30,7 +36,8 @@ module.exports = function () {
         getIndicatorsSchema: getIndicatorsSchema,
         setIndicatorsSchema: setIndicatorsSchema,
         getIndicatorHandlers: getIndicatorHandlers,
-        setIndicatorHandlers: setIndicatorHandlers
+        setIndicatorHandlers: setIndicatorHandlers,
+        buildPatientListReportExpression: buildPatientListReportExpression
     };
     function getReportList() {
         return reports;
@@ -55,6 +62,20 @@ module.exports = function () {
     function setIndicatorHandlers(_indicatorHandlers) {
         indicatorHandlers = _indicatorHandlers;
     }
+    function createIndicatorMap() {
+        // create a map
+        var map = {};
+        // Add key, value pairs into the map with indicator object
+        _.each(indicatorsSchema, function (indicator) {
+            var key = indicator.name;
+            var value = indicator;
+            map[key] = value;
+        });
+        //make map global
+        indicatorMap = map;
+
+    }
+
 
     function initialize(_reports, _indicatorsSchema, _indicatorHandlers) {
         setReportList(_reports);
@@ -166,43 +187,116 @@ module.exports = function () {
         successCallback([result, allReportSections]);
     }
 
+    function _buildQueryParts(requestParams, reportName, queryPartsArray) {
+      if (reportName) {
+          reportName = reportName;
+      } else {
+          reportName = requestParams.reportName;
+      }
+      var queryParts;
+      _.each(reports, function (report) {
+
+          if (report.name === reportName) {
+            var nestedParts = '';
+              if (report.table.dynamicDataset && report.table.dynamicDataset !== reportName) {
+                _buildQueryParts(requestParams, report.table.dynamicDataset, queryPartsArray);
+                //get the last item of the array
+                var n = queryPartsArray.length;
+                nestedParts = queryPartsArray[n-1];
+                //remove the object from the array
+                queryPartsArray.splice(n-1, 1);
+              } else {
+                nestedParts = undefined;
+              }
+              var queryParts = {
+                  columns: indicatorsToColumns(report, requestParams.countBy, requestParams),
+                  concatColumns: concatColumnsToColumns(report),
+                  table: report.table['schema'] + '.' + report.table['tableName'],
+                  alias: report.table['alias'],
+                  nestedParts: nestedParts,
+                  joins: joinsToSql(report.joins, requestParams),
+                  where: filtersToSql(requestParams.whereParams, report.parameters, report.filters),
+                  group: groupClauseToSql(report.groupClause, requestParams.groupBy, report.parameters),
+                  having: filtersToSql(requestParams.whereParams, report.parameters, report.having),
+                  order: orderByToSql(report),
+                  offset: requestParams.offset,
+                  limit: requestParams.limit
+              };
+              queryPartsArray.push(queryParts);
+          }
+      });
+    }
+
     function singleReportToSql(requestParams, reportName) {
         if (requestParams === null || requestParams === undefined) return "";
         var queryPartsArray = [];
-        if (reportName) {
-            reportName = reportName;
-        } else {
-            reportName = requestParams.reportName;
-        }
-        _.each(reports, function (report) {
-            if (report.name === reportName) {
-                var nestedParts = '';
-                if (report.table.hasNested && report.table.hasNested !== reportName) {
-                    nestedParts = singleReportToSql(requestParams, report.table.hasNested);
-
-                }
-                var queryParts = {
-                    columns: indicatorsToColumns(report, requestParams.countBy, requestParams),
-                    concatColumns: concatColumnsToColumns(report),
-                    table: report.table['schema'] + '.' + report.table['tableName'],
-                    alias: report.table['alias'],
-                    nestedParts: nestedParts,
-                    joins: joinsToSql(report.joins, requestParams),
-                    where: filtersToSql(requestParams.whereParams, report.parameters, report.filters),
-                    group: groupClauseToSql(report.groupClause, requestParams.groupBy, report.parameters),
-                    order: requestParams.order,
-                    offset: requestParams.offset,
-                    limit: requestParams.limit
-                };
-
-                queryPartsArray.push(queryParts);
-            }
-        });
+        _buildQueryParts(requestParams, reportName, queryPartsArray);
         return queryPartsArray;
     }
 
+    function orderByToSql(report) {
+        var order=[];
+        if(!report.orderBy) return null;
+        _.each(report.orderBy, function (orderBy) {
+            order.push(
+                {
+                    column: orderBy.column,
+                    asc: (orderBy.order.toLowerCase() === "asc")
+                }
+            );
+        });
+        console.log('----------------------->returned order by',order)
+        return order;
+    }
+
+
+function replaceIndicatorParam(_indicatorExpression, requestParam) {
+  var indicatorExpression = _indicatorExpression;
+  var result;
+  // console.log('underscore string', s.include(indicatorExpression,'endDate'));
+  if (s.include(indicatorExpression,'endDate')) {
+    if(requestParam.whereParams) {
+      var dateParam = _.find(requestParam.whereParams, function(param){
+        if(param.name === 'endDate') return param;
+      });
+
+      if (dateParam) {
+        indicatorExpression =  s.replaceAll(indicatorExpression,'endDate', "'"+ dateParam.value + "'");
+        // console.log('end date param', indicatorExpression);
+      }
+    }
+  }
+
+  if (s.include(indicatorExpression,'startDate')) {
+    if(requestParam.whereParams) {
+          var dateParam = _.find(requestParam.whereParams, function(param){
+            if(param.name === 'startDate') return param;
+          });
+
+      if (dateParam) {
+        indicatorExpression = s.replaceAll(indicatorExpression,'startDate', "'"+ dateParam.value + "'");
+        // console.log('start date param', indicatorExpression);
+      }
+    }
+  }
+  if (s.include(indicatorExpression,'@referenceDate')) {
+    if(requestParam.whereParams) {
+      var referenceParam = _.find(requestParam.whereParams, function(param) {
+        if(param.name === '@referenceDate') return param;
+      });
+
+      if (referenceParam) {
+          indicatorExpression = s.replaceAll(indicatorExpression,'@referenceDate', "'"+ referenceParam.value + "'");
+          console.log('@referenceDate param', indicatorExpression);
+      }
+    }
+  }
+
+  return indicatorExpression;
+}
     //converts a set of indicators into sql columns
     function indicatorsToColumns(report, countBy, requestParam) {
+      // console.log('request parameters', requestParam);
         var result = [];
         //converts a set of supplementColumns  into sql columns
         _.each(supplementColumnsToColumns(report), function (column) {
@@ -221,7 +315,9 @@ module.exports = function () {
                                     result.push(processesDerivedIndicator(report, singleIndicator, indicator));
                                 } else {
                                     var column = singleIndicator.sql + ' as ' + singleIndicator.label;
-                                    column = column.replace('$expression', indicator.expression);
+                                    //check if indicator expression has endDate and startDate parameters
+                                    var indicatorExpression = replaceIndicatorParam(indicator.expression, requestParam);
+                                    column = column.replace('$expression', indicatorExpression);
                                     result.push(column);
                                 }
                             }
@@ -231,10 +327,12 @@ module.exports = function () {
                     if (indicator.name === singleIndicator.expression) {
                         //Determine indicator type, whether it is derived or an independent indicator
                         if (singleIndicator.sql.match(/\[(.*?)\]/)) {
-                            result.push(processesDerivedIndicator(report, singleIndicator, indicator));
+                            result.push(processesDerivedIndicator(report, singleIndicator, indicator, requestParam));
                         } else {
                             var column = singleIndicator.sql + ' as ' + indicator.name;
-                            column = column.replace('$expression', indicator.expression);
+                            //check if indicator expression has endDate and startDate parameters
+                            var indicatorExpression = replaceIndicatorParam(indicator.expression, requestParam);
+                            column = column.replace('$expression', indicatorExpression);
                             result.push(column);
                         }
                     }
@@ -246,26 +344,30 @@ module.exports = function () {
     }
 
     //converts set of derived indicators to sql columns
-    function processesDerivedIndicator(report, derivedIndicator, indicator) {
+    function processesDerivedIndicator(report, derivedIndicator, indicator, requestParam) {
         var reg = /[\[\]']/g; //regex [] indicator
         var matches = [];
         derivedIndicator.sql.replace(/\[(.*?)\]/g, function (g0, g1) {
             matches.push(g1);
         });
+        derivedIndicator.sql = derivedIndicator.sql.replace(reg, '');
         _.each(matches, function (indicatorKey) {
             _.each(report.indicators, function (singleIndicator) {
                 if (indicatorKey === singleIndicator.expression) {
                     _.each(indicatorsSchema, function (indicator) {
                         if (indicator.name === indicatorKey) {
                             var column = singleIndicator.sql;
-                            column = column.replace('$expression', indicator.expression);
+                            // console.log('Derived Indicator request param', requestParam);
+                            var indicatorExpression = replaceIndicatorParam(indicator.expression, requestParam);
+                            column = column.replace('$expression', indicatorExpression);
                             derivedIndicator.sql = derivedIndicator.sql.replace(indicatorKey, column);
                         }
                     });
                 }
             });
         });
-        return derivedIndicator.sql.replace(reg, '') + ' as ' + indicator.name;
+        // console.log('track derived indicator', derivedIndicator.sql);
+        return derivedIndicator.sql + ' as ' + indicator.name;
     }
 
     //converts a set of supplement columns of type single into sql columns
@@ -308,22 +410,22 @@ module.exports = function () {
                     schema: join.schema,
                     tableName: join.tableName,
                     alias: join.alias,
-                    joinExpression: join.joinExpression
-                    ,
+                    joinExpression: join.joinExpression,
                     joinType: join.joinType
                 }
                 result.push(joinOject);
             } else {
-                var queryParts = singleReportToSql(requestParams, join.joinedReport)
+                var queryParts = singleReportToSql(requestParams, join.dynamicDataset)
+                // console.log('show the query parts here:', queryParts.length);
                 var joinOject = {
                     schema: join.schema,
                     tableName: join.tableName,
                     alias: join.alias,
-                    joinExpression: join.joinExpression
-                    ,
+                    joinExpression: join.joinExpression,
                     joinType: join.joinType,
-                    joinedQuerParts: queryParts
+                    joinedQuerParts: queryParts[0]
                 };
+                // console.log('testing dynamicDataset', joinOject);
                 result.push(joinOject);
                 //var r = [join['schema'] + '.' + join['tableName'], join['alias'], join['joinExpression'], join['joinType']];
             }
@@ -350,31 +452,240 @@ module.exports = function () {
         return result;
     }
 
+
+    function _getMatchingWhereExpression(whereParams, reportFilter) {
+
+      var matchingWhereExpression = _.find(whereParams, function(whereParam){
+        if ((whereParam["name"] === reportFilter["parameter"] &&
+        whereParam["value"])|| reportFilter["processForce"] === true) {
+          return whereParam;
+        }
+
+      });
+      return matchingWhereExpression;
+    }
     //converts an array of filters into sql
     function filtersToSql(whereParams, reportParams, reportFilters) {
         var result = [];
         var expression = '';
         var parameters = [];
+        // console.log('Report/Json Params', reportParams);
+        // console.log('Report/Filters', reportFilters);
+        // console.log('Web/Client Params', whereParams);
         _.each(reportFilters, function (reportFilter) {
-            _.each(whereParams, function (whereParam) {
-                //checks whether param value is set, if not set the filter is not pushed.
-                //also checks if report filter parameter passed is eq to where param
-                if (whereParam["name"] === reportFilter["parameter"] && whereParam["value"] || reportFilter["processForce"] == true) {
-                    expression += reportFilter["expression"];
-                    expression += ' and ';
-                    _.each(reportParams, function (reportParam) {
-                        if (reportParam["name"] === whereParam["name"]) {
-                            parameters.push(whereParam["value"]);
+
+          // console.log('final report--->', reportFilter);
+          //search in the web/Client params to see if there is a matching Param
+          //Process an array of Parameters in the report filters
+          var reportFilterParam = reportFilter["parameter"];
+          var reportFilterParamArray = [];
+          if(s.include(reportFilterParam,',')) {
+            reportFilterParamArray = reportFilterParam.split(',');
+          }
+          var matchingWhereExpression;
+
+          if(reportFilterParamArray.length > 1) {
+
+            for(var i in reportFilterParamArray) {
+              var dummyReportFilter = {
+                parameter: reportFilterParamArray[i],
+                processForce:reportFilter["processForce"]
+              };
+              matchingWhereExpression = _getMatchingWhereExpression(whereParams, dummyReportFilter);
+              if(!_.isUndefined(matchingWhereExpression) && i === '0') {
+                expression += reportFilter["expression"];
+                expression += ' and ';
+              }
+              if(!_.isUndefined(matchingWhereExpression)) {
+                var matchingReportParam = _.find(reportParams, function(reportParam){
+                  if (reportParam["name"] === matchingWhereExpression["name"])
+                  return reportParam;
+                });
+
+                if(!_.isUndefined(matchingReportParam) && reportFilter["processForce"] !==true) {
+                  parameters.push(matchingWhereExpression["value"]);
+                }
+              }
+            }
+
+          } else {
+            matchingWhereExpression = _getMatchingWhereExpression(whereParams, reportFilter);
+            if(!_.isUndefined(matchingWhereExpression)) {
+              expression += reportFilter["expression"];
+              expression += ' and ';
+
+              var matchingReportParam = _.find(reportParams, function(reportParam){
+                if (reportParam["name"] === matchingWhereExpression["name"])
+                return reportParam;
+              });
+              // console.log('final params-report', matchingReportParam);
+              // console.log('final params-where', matchingWhereExpression);
+              if(!_.isUndefined(matchingReportParam) && reportFilter["processForce"] !==true ) {
+                parameters.push(matchingWhereExpression["value"]);
+              }
+            }
+          }
+        });
+        var lastIndex = expression.lastIndexOf('and');
+        expression = expression.substring(0, lastIndex);
+        result.push(expression);
+        // console.log('final results', result);
+        // console.log('final paras', parameters);
+        result.push.apply(result, parameters);
+
+        return result;
+    }
+
+    //converts a set of indicators into sql columns
+    function indicatorsToFilter(report, requestParam) {
+       // console.log('request parameters', requestParam);
+        var result = '';
+        //converts set of indicators to sql columns
+        _.each(report.indicators, function (singleIndicator) {
+            _.each(indicatorsSchema, function (indicator) {
+                if (requestParam.requestIndicators) {
+                    //compare request params indicator list corresponds to the singleIndicator
+                    _.each(requestParam.requestIndicators.split(','), function (requestIndicatorName) {
+                        if (indicator.name === requestIndicatorName) {
+                            if (indicator.name === singleIndicator.expression) {
+                                //Determine indicator type, whether it is derived or an independent indicator
+                                if (singleIndicator.sql.match(/\[(.*?)\]/)) {
+                                    //result.push(processesDerivedIndicator(report, singleIndicator, indicator));
+                                } else {
+                                    //check if indicator expression has endDate and startDate parameters
+                                    var indicatorExpression = replaceIndicatorParam(indicator.expression, requestParam);
+                                    result += '(' + indicatorExpression + ') or ';
+                                }
+                            }
                         }
                     });
                 }
             });
         });
-        var lastIndex = expression.lastIndexOf('and');
-        expression = expression.substring(0, lastIndex);
-        result.push(expression);
-        result.push.apply(result, parameters);
+        var lastIndex = result.lastIndexOf(' or ');
+        result = result.substring(0, lastIndex);
         return result;
     }
+
+    function reportWhereClauseToFilter(queryParams, reportName) {
+        var reportParams = queryParams;
+        //
+        var whereClause = '';
+        var table='';
+        _.each(reports, function (report) {
+
+            if (report.name === reportName ) {
+                // reportParams.reportName = reportName;
+                var reportWhereClause = filtersToSql(reportParams.whereParams, report.parameters, report.filters);;
+                if(report.table.schema!==''&&report.table.table!=='') {
+                    table = report.table['schema'] + '.' + report.table['tableName'];
+                }
+                var indicatorWhereClause = indicatorsToFilter(report, reportParams);
+                if( reportWhereClause[0]) {
+                    reportWhereClause[0] = reportWhereClause[0] + ' and ' + indicatorWhereClause;
+                }else{
+                    reportWhereClause[0] = indicatorWhereClause;
+                }
+                if (indicatorWhereClause) whereClause = reportWhereClause;
+
+
+            }
+        });
+
+
+        return {
+            whereClause:whereClause,
+            table:table
+
+        };
+    }
+    function dynamicDataSetToFilter(queryParams, reportName){
+        var query='';
+        var param=[];
+        if(reportName!==undefined) {
+            var resource = reportWhereClauseToFilter(queryParams, reportName);
+            var filter =resource.whereClause;
+            if (filter) {
+                query += filter[0] + ' and ';
+                filter.shift();
+                param.push.apply(param, filter);
+            }
+            var lastIndex = query.lastIndexOf(' and ');
+            query = query.substring(0, lastIndex);
+        }
+        return {
+            query:query,
+            params:param
+        };
+    }
+    function buildQueryAndParams(reportName,queryParams) {
+        var query = '';
+        var param = [];
+        console.log('Get report---->', reportName);
+        _.each(reports, function (report) {
+            if (report.name === reportName) {
+                var filter = dynamicDataSetToFilter(queryParams, report.name);
+                if (filter.query !== '') {
+                    query += filter.query + ' and ';
+                    param.push.apply(param, filter.params);
+                }
+                _.each(report.joins, function (join) {
+                    if (join.dynamicDataset) {
+                        var filter = buildQueryAndParams(join.dynamicDataset, queryParams);
+                        if (filter.query !== '') {
+                            query += filter.query + ' and ';
+                            param.push.apply(param, filter.params);
+                        }
+                    }
+                });
+                if (report.table.dynamicDataset) {
+                    var filter = buildQueryAndParams(report.table.dynamicDataset, queryParams, query, param);
+                    if (filter.query !== '') {
+                        query += filter.query + ' and ';
+                        param.push.apply(param, filter.params);
+                    }
+                }
+            }
+        });
+
+        var lastIndex = query.lastIndexOf(' and ');
+        query = query.substring(0, lastIndex);
+        return {
+            query: query,
+            params: param
+        };
+
+    }
+
+    function buildPatientListReportExpression(queryParams, successCallback) {
+        var result = {
+            whereClause: [],
+            resource: ''
+        };
+
+        //Check for undefined params
+        if (queryParams === null || queryParams === undefined) return "";
+        _.each(reports, function (report) {
+            if (report.name === queryParams.reportName) {
+
+                var filter=buildQueryAndParams(report.name,queryParams);
+                if(filter.params.length===0) {
+                    filter.query += ' and '+report.filters[0].expression ;
+                    _.each(queryParams.whereParams, function (whereParam) {
+                        if (whereParam.name === 'locations') {
+                            filter.params.push( whereParam.value);
+                        }
+
+                    });
+                }
+                result.whereClause.push(filter.query);
+                result.whereClause.push.apply(result.whereClause, filter.params);
+                result.resource = filter.table;
+            }
+        });
+        successCallback(result);
+    }
+
+
 
 }();

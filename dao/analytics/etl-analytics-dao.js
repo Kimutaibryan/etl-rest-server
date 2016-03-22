@@ -33,11 +33,12 @@ module.exports = function() {
       });
     },
     getReportIndicators: function getReportIndicators(request, callback) {
-      console.log('Getting Here', request.query);
+      // console.log('Getting Here', request.query);
       var reportName = request.query.report;
       var countBy = request.query.countBy;
       var startDate = request.query.startDate || new Date().toISOString().substring(0, 10);
       var endDate = request.query.endDate || new Date().toISOString().substring(0, 10);
+      var referenceDate = request.query.referenceDate || new Date().toISOString().substring(0, 10);
       var order = helpers.getSortOrder(request.query.order);
       var locations;
       if (request.query.locations) {
@@ -47,6 +48,7 @@ module.exports = function() {
         });
       }
       var requestIndicators = request.query.indicators;
+
       //build query params
       var requestParams = {
         reportName: reportName,
@@ -59,11 +61,18 @@ module.exports = function() {
         }, {
           "name": "locations",
           "value": locations
-        }],
-        order: order || [{
-          column: 't1.location_id',
-          asc: true
-        }],
+        }, {
+          "name": "@referenceDate",
+          "value": referenceDate
+        }, {
+          "name": "patientUuid",
+          "value": request.query["patientUuid"]
+          }
+        ],
+        // order: order || [{
+        //   column: 't1.location_id',
+        //   asc: true
+        // }],
         countBy: countBy || 'num_persons',
         groupBy: request.query.groupBy || 'groupByLocation',
         offset: request.query.startIndex,
@@ -72,7 +81,7 @@ module.exports = function() {
       };
       //build report
       var queryParts =reportFactory.singleReportToSql(requestParams);
-
+      console.log('Query parts before getting to the server',queryParts.length);
       db.reportQueryServer(queryParts, function(results) {
         callback(reportFactory.resolveIndicators(reportName, results));
       });
@@ -257,6 +266,69 @@ module.exports = function() {
         callback(result);
       });
 
+    },
+    getPatientListReportByIndicatorAndLocation: function getPatientListReportByIndicatorAndLocation(request, callback) {
+      console.log('Getting Here', request.query);
+      var requestIndicators = request.query.indicator;
+      var startDate = request.query.startDate || new Date().toISOString().substring(0, 10);
+      var endDate = request.query.endDate || new Date().toISOString().substring(0, 10);
+      var order =  helpers.getSortOrder(request.query.order);
+      var reportName = request.query.reportName || 'hiv-summary-report';
+      var locationIds = request.query.locations;
+      var locations = [];
+      _.each(locationIds.split(','), function(loc) {
+        locations.push(Number(loc));
+      });
+      //Check for undefined query field
+      if (requestIndicators === undefined)
+        callback(Boom.badRequest('indicator (Report Indicator) is missing from your request query'));
+      //declare query params
+      //build query params
+
+      var queryParams = {
+        requestIndicators: requestIndicators,
+        reportName: reportName,
+        whereParams: [{
+          "name": "startDate",
+          "value": startDate
+        }, {
+          "name": "endDate",
+          "value": endDate
+        }, {
+          "name": "locations",
+          "value": locations
+        }]
+      };
+      //build report
+      reportFactory.buildPatientListReportExpression(queryParams, function(exprResult) {
+        console.log('here is the where clause',exprResult.whereClause);
+        var queryParts = {
+          columns: "t1.person_id,t1.encounter_id,t1.location_id,t1.location_uuid, t1.uuid as patient_uuid, t4.gender, t4.birthdate",
+          concatColumns: "concat(t2.given_name,' ',t2.middle_name,' ',t2.family_name) as person_name;" +
+          "group_concat(distinct t3.identifier separator ', ') as identifiers",
+          table: "etl.flat_hiv_summary",
+          where: exprResult.whereClause,
+          joins: [
+            ['amrs.person_name', 't2', 't1.person_id = t2.person_id'],
+            ['amrs.person', 't4', 't1.person_id = t4.person_id']
+          ],
+          leftOuterJoins: [
+            ['amrs.patient_identifier', 't3', 't1.person_id = t3.patient_id']
+          ],
+          order: order || [{
+            column: 'encounter_datetime',
+            asc: false
+          }],
+          offset: request.query.startIndex,
+          limit: request.query.limit,
+          group: ['t1.person_id']
+        };
+        db.queryServer_test(queryParts, function(result) {
+          callback(result);
+        });
+      });
     }
+
+
   };
 }();
