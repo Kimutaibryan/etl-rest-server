@@ -18,8 +18,11 @@ var Vision = require('vision');
 var HapiSwagger = require('hapi-swagger');
 var Pack = require('./package');
 var hapiAuthorization = require('hapi-authorization');
+var Nes = require('nes');
+var pub = require('redis-connection')();
+var sub = require('redis-connection')('subscriber');
 var authorizer = require('./authorization/etl-authorizer');
-var user ='';
+var user = '';
 var server = new Hapi.Server({
   connections: {
     //routes: {cors:{origin:["https://amrs.ampath.or.ke:8443"]}}
@@ -46,7 +49,7 @@ server.connection({
 });
 var pool = mysql.createPool(config.mysql);
 
-var validate = function (username, password, callback) {
+var validate = function(username, password, callback) {
 
   //Openmrs context
   var openmrsAppName = config.openmrs.applicationName || 'amrs';
@@ -63,18 +66,17 @@ var validate = function (username, password, callback) {
   }
   https.get(options, function(res) {
     var body = '';
-    res.on('data', function (chunk) {
+    res.on('data', function(chunk) {
       body += chunk;
     });
-    res.on('end', function () {
+    res.on('end', function() {
       var result = JSON.parse(body);
       user = result.user.username;
       authorizer.setUser(result.user);
       var currentUser = {
         username: username,
         role: authorizer.isSuperUser() ?
-          authorizer.getAllPrivilegesArray() :
-          authorizer.getCurrentUserPreviliges()
+          authorizer.getAllPrivilegesArray() : authorizer.getCurrentUserPreviliges()
       };
 
       //console.log('Logged in user:', currentUser);
@@ -82,7 +84,7 @@ var validate = function (username, password, callback) {
       callback(null, result.authenticated, currentUser);
 
     });
-  }).on('error', function (error) {
+  }).on('error', function(error) {
     //console.log(error);
     callback(null, false);
   });
@@ -96,8 +98,8 @@ var HapiSwaggerOptions = {
   tags: [{
     'name': 'patient'
   }, {
-      'name': 'location'
-    }],
+    'name': 'location'
+  }],
   sortEndpoints: 'path'
 };
 
@@ -107,28 +109,28 @@ server.ext('onRequest', function(request, reply) {
 
 });
 server.register([
-  Inert,
-  Vision, {
-    'register': HapiSwagger,
-    'options': HapiSwaggerOptions
-  }, {
-    register: Basic,
-    options: {}
-  }, {
-    register: hapiAuthorization,
-    options: {
-      roles: authorizer.getAllPrivilegesArray()
+    Inert,
+    Vision,
+    Nes, {
+      'register': HapiSwagger,
+      'options': HapiSwaggerOptions
+    }, {
+      register: Basic,
+      options: {}
+    }, {
+      register: hapiAuthorization,
+      options: {
+        roles: authorizer.getAllPrivilegesArray()
+      }
+    }, {
+      register: Good,
+      options: {
+        reporters: []
+      }
     }
-  },
-  {
-    register: Good,
-    options: {
-      reporters: []
-    }
-  }
-],
+  ],
 
-  function (err) {
+  function(err) {
     if (err) {
       throw err; // something bad happened loading the plugin
     }
@@ -145,17 +147,46 @@ server.register([
       server.route(elasticRoutes[route]);
     }
 
-    server.on('response', function (request) {
-      if (request.response === undefined ||request.response===null){
+    function broadcastHandler(socket) {
+      socket.on('broadcast:message', function(msg) {
+        console.log("msg:", msg);
+        // console.log("message received: " + msg + " );
+        var str = JSON.stringify(msg);
+        console.log(str);
+        pub.RPUSH("broadcast:messages", str); // notification history
+        pub.publish("broadcast:messages:latest", str); // latest notification
+      });
+    }
+
+    function init(listener, callback) {
+    // setup redis pub/sub independently of any socket connections
+      pub.on("ready", function() {
+        // console.log("PUB Ready!");
+        sub.on("ready", function() {
+          sub.subscribe("broadcast:messages:latest");
+          // now start the socket.io
+          listener.onConnection(broadcastHandler);
+          // Here's where all Redis messages get relayed to Socket.io clients
+          sub.on("message", function(channel, message) {
+            console.log(channel + " : " + message);
+            var msg = JSON.stringify(message);
+            server.broadcast(message); // relay to all connected socket clients
+          });
+          setTimeout(function() {
+            callback()
+          }, 300); // wait for socket to boot
+        });
+      });
+    }
+
+    server.on('response', function(request) {
+      if (request.response === undefined || request.response === null) {
         console.log("No response");
-      }else{
+      } else {
         console.log(
-             'Username:',
-            user +'\n'+
-            moment().local().format("YYYY-MM-DD HH:mm:ss") + ': ' +  server.info.uri + ': '
-            + request.method.toUpperCase() + ' '
-            + request.url.path + ' \n '
-            + request.response.statusCode
+          'Username:',
+          user + '\n' +
+          moment().local().format("YYYY-MM-DD HH:mm:ss") + ': ' + server.info.uri + ': ' + request.method.toUpperCase() + ' ' + request.url.path + ' \n ' + request.response.statusCode
         );
 
       }
@@ -164,8 +195,12 @@ server.register([
 
 
     server.ext('onPreResponse', corsHeaders);
-    server.start(function () {
+    server.start(function() {
       server.log('info', 'Server running at: ' + server.info.uri);
+      init(server.listener, function(){
+        // console.log('REDISCLOUD_URL:', process.env.REDISCLOUD_URL);
+        server.log('broadcast ready?', 'listening on:' + config.etl.host +':'+ config.etl.port);
+      });
     });
 
 

@@ -34,6 +34,12 @@ module.exports = function () {
                 tags: ['api'],
             }
         }, {
+            method: 'GET',
+            path: '/etl/load-notification',
+            config: {
+              handler: require('./notification-messages').load
+            }
+        },{
             method: 'POST',
             path: '/javascript-errors',
             config: {
